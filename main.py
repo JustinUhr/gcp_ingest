@@ -16,7 +16,7 @@ stream_map = {
 cache = {}
 
 # Column name for matching transcripts/translations to videos
-VIDEO_PARENT_COLUMN = 'Parent Filename of the access interview file'
+VIDEO_PARENT_COLUMN = 'parent'
 
 def abbr_path(path:str, length:int, sep:str='/',abbr_len:int=2):
   if len(path) < length:
