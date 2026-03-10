@@ -82,28 +82,34 @@ def dict_from_row(row, pid=None):
   # add path to cache
   cache[filepath_str]['path'] = filepath
   filename = str(row['identifierFileName']).strip()
+
   if not filepath.exists():
     logging.warning(f"File {filepath} does not exist")
     return {}
-  if not filepath.is_dir():
-    logging.warning(f"File {filepath} is not a directory")
-    return {}
 
-  if not cache[filepath_str].get('glob', None):
-    cache[filepath_str]['glob'] = list(filepath.glob('*'))
-  fileglob = cache[filepath_str]['glob']
-  logging.debug(f"Fileglob: {fileglob}")
-  files = file_from_glob(filename, fileglob,allowed_streams=stream_map.keys())
-
-  if len(files) == 0:
-    logging.warning(f"No files found for {filename} in {filepath}")
-    return {}
-  if len(files) > 1:
-    logging.warning(f'Multiple files found for {filename}: {files}')
-    return {}
+  if filepath.is_dir():
+    # Old format: filepath is a directory, glob for filename
+    if not cache[filepath_str].get('glob', None):
+      cache[filepath_str]['glob'] = list(filepath.glob('*'))
+    fileglob = cache[filepath_str]['glob']
+    logging.debug(f"Fileglob: {fileglob}")
+    files = file_from_glob(filename, fileglob, allowed_streams=stream_map.keys())
+    if len(files) == 0:
+      logging.warning(f"No files found for {filename} in {filepath}")
+      return {}
+    if len(files) > 1:
+      logging.warning(f'Multiple files found for {filename}: {files}')
+      return {}
+    found_file = files[0]
+  else:
+    # New format: filepath is the file itself
+    if filepath.stem != filename:
+      logging.warning(f"Filename mismatch: expected {filename}, got {filepath.stem}")
+      return {}
+    found_file = filepath
 
   result_dict = {
-    'filepath': files[0],
+    'filepath': found_file,
     'filename': filename,
   }
 
@@ -115,7 +121,7 @@ def dict_from_row(row, pid=None):
   elif 'translations (documents)' in genre:
     result_dict['doc_type'] = 'translation'
     result_dict['video_parent'] = row.get(VIDEO_PARENT_COLUMN, '').strip()
-  elif files[0].suffix.lower() in ['.mov', '.mp4']:
+  elif found_file.suffix.lower() in ['.mov', '.mp4']:
     result_dict['doc_type'] = 'video'
   else:
     result_dict['doc_type'] = 'other_pdf'
