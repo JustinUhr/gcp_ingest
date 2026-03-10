@@ -97,7 +97,10 @@ def ingest_files(
     mods_path,
     file_path,
     allowed_streams:dict,
-    parent_relationship=None
+    parent_relationship=None,
+    page_number=None,
+    additional_parents=None,
+    transcript_of=None
   ) -> str:
   """
   Ingests files into a system.
@@ -106,6 +109,9 @@ def ingest_files(
     file_path (str): The path to the file to ingest.
     allowed_streams (dict): A dictionary mapping file extensions to content streams.
     parent_relationship (tuple): The pid and relationship to parent. Defaults to None.
+    page_number (str|int): Page number/order for the item. Defaults to None.
+    additional_parents (list): Additional parent PIDs for dual parentage. Defaults to None.
+    transcript_of (str): PID this item is a transcript of (sets isTranscriptOf). Defaults to None.
   Returns:
     (str): The PID of the ingested files.
   """
@@ -115,7 +121,7 @@ def ingest_files(
 
   mods_path = Path(mods_path)
   if not mods_path.exists():
-    logging.WARNING(f"mods file {mods_path.name} does not exist. skipping...")
+    logging.warning(f"mods file {mods_path.name} does not exist. skipping...")
     return
   with open(mods_path, "r") as mods_file:
     mods_file_obj = mods_file.read()
@@ -129,11 +135,23 @@ def ingest_files(
   (parent_pid, rel_type) = parent_relationship
   if rel_type not in ['isPartOf', 'isTranslationOf', 'isTranscriptOf']:
     raise ValueError(f"Invalid relationship type: {rel_type}")
+  
   # Read params['rels'] into a dict
   temp_rels = json.loads(params["rels"])
 
-  # Set the parent pid and page number
-  temp_rels[rel_type] = parent_pid
+  # Build parent list (primary + additional)
+  parent_pids = [parent_pid]
+  if additional_parents:
+    parent_pids.extend(additional_parents)
+  temp_rels[rel_type] = ','.join(parent_pids)
+
+  # Set page number if provided
+  if page_number is not None:
+    temp_rels['page_number'] = str(page_number)
+
+  # Set transcript relationship (separate from isPartOf parentage)
+  if transcript_of:
+    temp_rels['isTranscriptOf'] = transcript_of
 
   # Convert params['rels'] back to a string
   params["rels"] = json.dumps(temp_rels)
