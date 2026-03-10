@@ -50,19 +50,24 @@ def get_mnt_path_from_windows_path(windows_path:str, cache={'mntdir':{'path':Pat
     return cache[windows_path]['path']
 
   winpath = PureWindowsPath(windows_path)
-  new_root = cache['mntdir']['path'].joinpath(winpath.drive[0].lower())
-
   split_path = windows_path.split('\\')
   cache_options = get_cache_options(split_path)
-  # logging.debug(f"Cache options: {cache_options}")
+
+  if winpath.drive:
+    # Old format: Z:\path\... → mntdir/z/path/...
+    new_root = cache['mntdir']['path'].joinpath(winpath.drive[0].lower())
+    parts_start = 1  # skip drive component
+  else:
+    # New format: files22.brown.edu\path\... → mntdir/path/...
+    new_root = cache['mntdir']['path']
+    parts_start = 1  # skip server name
 
   for option in cache_options:
     if option in cache:
-      # get the remaining path after the cached path
       remaining_path = '\\'.join(split_path[len(option.split('\\')):])
       return cache[option]['path'].joinpath(remaining_path)
     else:
-      filepath = new_root.joinpath(*option.split('\\')[1:])
+      filepath = new_root.joinpath(*option.split('\\')[parts_start:])
       cache[option] = {'path':filepath}
 
   cache[windows_path] = {'path': filepath}
