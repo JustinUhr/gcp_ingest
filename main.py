@@ -113,18 +113,23 @@ def dict_from_row(row, pid=None):
     'filename': filename,
   }
 
-  # Determine document type based on genre and file extension
-  genre = row.get('genreAAT', '')
-  if 'transcriptions (documents)' in genre:
-    result_dict['doc_type'] = 'transcript'
-    result_dict['video_parent'] = row.get(VIDEO_PARENT_COLUMN, '').strip()
-  elif 'translations (documents)' in genre:
-    result_dict['doc_type'] = 'translation'
-    result_dict['video_parent'] = row.get(VIDEO_PARENT_COLUMN, '').strip()
-  elif found_file.suffix.lower() in ['.mov', '.mp4']:
+  # Determine document type - extension first, then title for PDFs
+  if found_file.suffix.lower() in ['.mov', '.mp4']:
     result_dict['doc_type'] = 'video'
+  elif found_file.suffix.lower() == '.pdf':
+    title = row.get('itemTitle', '').lower()
+    if 'transcript' in title:
+      result_dict['doc_type'] = 'transcript'
+      result_dict['video_parent'] = row.get(VIDEO_PARENT_COLUMN, '').strip()
+    elif 'translation' in title:
+      result_dict['doc_type'] = 'translation'
+      result_dict['video_parent'] = row.get(VIDEO_PARENT_COLUMN, '').strip()
+    else:
+      result_dict['doc_type'] = 'other_pdf'
+      logging.debug(f"Treating {filename} as other_pdf (title: {row.get('itemTitle', '')})")
   else:
-    result_dict['doc_type'] = 'other_pdf'
+    logging.error(f"Unsupported file type for {filename}: {found_file.suffix}")
+    raise ValueError(f"Unsupported file type: {found_file.suffix}")
 
   if pid:
     result_dict.update({
