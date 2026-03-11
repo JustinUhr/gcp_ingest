@@ -33,9 +33,7 @@ def setup_environment():
 
   return env_vars
 
-def set_basic_params(env_vars):
-  """Sets forthright params.
-  Called by run_create_metadata_only_object()"""
+def set_basic_params(env_vars, additional_rights='BDR_PUBLIC#discover,display'):
   params = {
     "identity": env_vars["api_identity"],
     "authorization_code": env_vars["api_key"],
@@ -43,7 +41,7 @@ def set_basic_params(env_vars):
       {
         "parameters": {
           "owner_id": env_vars["owner_id"],
-          "additional_rights": 'BDR_PUBLIC#discover,display'
+          "additional_rights": additional_rights
         }
       }
     ),
@@ -93,6 +91,8 @@ def perform_post(api_url, data, files=None):
     logging.error(msg)
     raise Exception(msg)
 
+VIDEO_EXTENSIONS = [".mov", ".mp4", ".avi", ".mkv"]
+
 def ingest_files(
     mods_path,
     file_path,
@@ -117,7 +117,15 @@ def ingest_files(
   """
 
   env_vars = setup_environment()
-  params = set_basic_params(env_vars)
+
+  if not parent_relationship:
+    additional_rights = 'BDR_PUBLIC#discover,display'
+  elif file_path and Path(file_path).suffix.lower() in VIDEO_EXTENSIONS:
+    additional_rights = ''
+  else:
+    additional_rights = 'BDR_PUBLIC#display'
+
+  params = set_basic_params(env_vars, additional_rights=additional_rights)
 
   mods_path = Path(mods_path)
   if not mods_path.exists():
