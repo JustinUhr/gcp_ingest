@@ -148,10 +148,23 @@ def file_from_glob(filename, fileglob,allowed_streams=[]):
     files.append(file)
   return files
 
+def match_transcript_to_video(transcript_filename, videos):
+  if len(videos) == 1:
+    return videos[0]
+  # Try to match on first segment before underscore e.g. C0008_French -> C0008 matches C0008_AF
+  transcript_prefix = transcript_filename.split('_')[0]
+  matches = [v for v in videos if v['filename'].split('_')[0] == transcript_prefix]
+  if len(matches) == 1:
+    return matches[0]
+  if len(matches) > 1:
+    logging.error(f"Multiple video matches for {transcript_filename}: {[v['filename'] for v in matches]}")
+    return None
+  logging.error(f"No video match for {transcript_filename}. Videos: {[v['filename'] for v in videos]}")
+  return None
+
 def make_ingestable(data: pd.DataFrame):
   logging.info("Making data ingestable")
 
-  # Validate required column exists
   if VIDEO_PARENT_COLUMN not in data.columns:
     raise ValueError(f"Required column '{VIDEO_PARENT_COLUMN}' not found in spreadsheet. "
                      f"Available columns: {list(data.columns)}")
@@ -172,32 +185,38 @@ def make_ingestable(data: pd.DataFrame):
     if not row['identifierFileName'] or not row["filepath"]:
       logging.warning(f"Row has no filename and/or path: {row['itemTitle']}")
       continue
-    if row['parent'] and type(row['parent']) is str:
+    # Skip rows that have a parent - they'll be collected as children below
+    if row[VIDEO_PARENT_COLUMN] and type(row[VIDEO_PARENT_COLUMN]) is str:
       continue
 
+    root_filename = str(row['identifierFileName']).strip()
+
     if row.get("pid"):
+      # Parent already ingested - collect any uningest children
       for child in data_dict:
         if child.get('ingestcomplete'):
           logging.debug(f"ingest already completed for {child['itemTitle']}")
           continue
         if not child['identifierFileName']:
           continue
-        if child['parent'] == row['identifierFileName']:
-          parented_data.append(dict_from_row(child,row['pid']))
+        if child[VIDEO_PARENT_COLUMN] == root_filename:
+          parented_data.append(dict_from_row(child, row['pid']))
       continue
 
-    # New parent item - gather all children
-    children = []
+    # Root video row becomes first child of synthesized metadata-only parent
+    root_video_dict = dict_from_row(row)
+    children = [root_video_dict] if root_video_dict else []
+
     for child in data_dict:
       if not child['identifierFileName']:
         continue
-      if child['parent'] == row['identifierFileName']:
+      if child[VIDEO_PARENT_COLUMN] == root_filename:
         child_dict = dict_from_row(child)
         if child_dict:
           children.append(child_dict)
 
     parent = {
-      "filename": row['identifierFileName'],
+      "filename": root_filename,
       "filepath": None,
       'children': children,
     }
@@ -215,15 +234,12 @@ def ingest_data(data, mods_dir):
     parent_pid = item.get('pid', None)
 
     if parent_pid:
-      # Item already has a parent PID - this is adding to existing parent
-      # TODO: Handle this case with new logic if needed for resuming partial ingests
       filepath = item['filepath']
       mods = Path(mods_dir).joinpath(f'{filename}.mods.xml')
       logging.info(f'Ingesting {filename} with existing parent {parent_pid}')
       ingest_files(mods, filepath, stream_map, (parent_pid, 'isPartOf'))
       continue
 
-    # New parent item - process with full workflow
     children = item.get('children', [])
 
     # Categorize children by type
@@ -232,27 +248,17 @@ def ingest_data(data, mods_dir):
     translations = [c for c in children if c.get('doc_type') == 'translation']
     other_pdfs = [c for c in children if c.get('doc_type') == 'other_pdf']
 
-    # Sort videos by filename to establish order
     videos.sort(key=lambda v: v['filename'])
 
-    # Validate transcript/translation video references before starting
-    video_filenames = {v['filename'] for v in videos}
+    # Validate transcript/translation matching before starting any ingestion
     for transcript in transcripts:
-      video_parent = transcript.get('video_parent')
-      if not video_parent:
-        raise ValueError(f"Transcript {transcript['filename']} missing '{VIDEO_PARENT_COLUMN}' value")
-      if video_parent not in video_filenames:
-        raise ValueError(f"Transcript {transcript['filename']} references video '{video_parent}' "
-                         f"which was not found. Known videos: {sorted(video_filenames)}")
+      if not match_transcript_to_video(transcript['filename'], videos):
+        raise ValueError(f"Could not match transcript {transcript['filename']} to a video")
     for translation in translations:
-      video_parent = translation.get('video_parent')
-      if not video_parent:
-        raise ValueError(f"Translation {translation['filename']} missing '{VIDEO_PARENT_COLUMN}' value")
-      if video_parent not in video_filenames:
-        raise ValueError(f"Translation {translation['filename']} references video '{video_parent}' "
-                         f"which was not found. Known videos: {sorted(video_filenames)}")
+      if not match_transcript_to_video(translation['filename'], videos):
+        raise ValueError(f"Could not match translation {translation['filename']} to a video")
 
-    # Create parent item first
+    # Create synthesized metadata-only parent using root video's MODS
     mods = Path(mods_dir).joinpath(f'{filename}.mods.xml')
     logging.info(f'Ingesting parent item {filename}')
     parent_pid = ingest_files(mods, None, stream_map)
@@ -261,10 +267,8 @@ def ingest_data(data, mods_dir):
       raise RuntimeError(f"Failed to create parent item {filename}")
     logging.info(f'Created parent {parent_pid}')
 
-    # Track video info for matching transcripts/translations
     video_info = {}  # filename -> {pid, page_num}
 
-    # Ingest videos with page numbers
     for i, video in enumerate(videos, start=1):
       video_mods = Path(mods_dir).joinpath(f'{video["filename"]}.mods.xml')
       logging.info(f'Ingesting video {video["filename"]} as page {i}')
@@ -276,20 +280,15 @@ def ingest_data(data, mods_dir):
         page_number=i
       )
       if not video_pid:
-        logging.error(f"Ingest failed for video {video['filename']}")
         raise RuntimeError(f"Failed to create video item {video['filename']}")
-
       video_info[video['filename']] = {'pid': video_pid, 'page_num': i}
       logging.info(f'Created video {video_pid}, queuing stream job')
-
-      # Queue stream creation - stream will inherit page_number and parent from video
       queue_create_stream_job(video_pid)
 
-    # Ingest transcripts
     for transcript in transcripts:
-      video_filename = transcript.get('video_parent')
-      video = video_info[video_filename]
-      page_num = f"{video['page_num']}a"
+      video = match_transcript_to_video(transcript['filename'], videos)
+      v_info = video_info[video['filename']]
+      page_num = f"{v_info['page_num']}a"
 
       transcript_mods = Path(mods_dir).joinpath(f'{transcript["filename"]}.mods.xml')
       logging.info(f'Ingesting transcript {transcript["filename"]} as page {page_num}')
@@ -299,18 +298,17 @@ def ingest_data(data, mods_dir):
         stream_map,
         parent_relationship=(parent_pid, 'isPartOf'),
         page_number=page_num,
-        additional_parents=[video['pid']],
-        transcript_of=video['pid']
+        additional_parents=[v_info['pid']],
+        transcript_of=v_info['pid']
       )
       if not transcript_pid:
         raise RuntimeError(f"Failed to create transcript {transcript['filename']}")
       logging.info(f'Created transcript {transcript_pid}')
 
-    # Ingest translations
     for translation in translations:
-      video_filename = translation.get('video_parent')
-      video = video_info[video_filename]
-      page_num = f"{video['page_num']}b"
+      video = match_transcript_to_video(translation['filename'], videos)
+      v_info = video_info[video['filename']]
+      page_num = f"{v_info['page_num']}b"
 
       translation_mods = Path(mods_dir).joinpath(f'{translation["filename"]}.mods.xml')
       logging.info(f'Ingesting translation {translation["filename"]} as page {page_num}')
@@ -320,17 +318,14 @@ def ingest_data(data, mods_dir):
         stream_map,
         parent_relationship=(parent_pid, 'isPartOf'),
         page_number=page_num,
-        additional_parents=[video['pid']]
-        # Note: no transcript_of for translations
+        additional_parents=[v_info['pid']]
       )
       if not translation_pid:
         raise RuntimeError(f"Failed to create translation {translation['filename']}")
       logging.info(f'Created translation {translation_pid}')
 
-    # Ingest other PDFs
     for i, pdf in enumerate(other_pdfs):
-      page_num = chr(ord('a') + i)  # a, b, c, ...
-
+      page_num = chr(ord('a') + i)
       pdf_mods = Path(mods_dir).joinpath(f'{pdf["filename"]}.mods.xml')
       logging.info(f'Ingesting other PDF {pdf["filename"]} as page {page_num}')
       pdf_pid = ingest_files(
