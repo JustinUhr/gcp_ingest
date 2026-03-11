@@ -7,6 +7,7 @@ from ingest import ingest_files
 from create_streams import queue_create_stream_job
 import logging
 import pandas as pd
+import json
 
 stream_map = {
   ".mov": "VIDEO-MASTER",
@@ -230,21 +231,30 @@ def make_ingestable(data: pd.DataFrame):
   logging.debug(pformat(parented_data,sort_dicts=False,))
   return parented_data
 
-def ingest_data(data, mods_dir):
+def get_progress_file(data_file, sheet):
+  stem = Path(data_file).stem
+  return Path(f'../{stem}_{sheet}_progress.json')
+
+def load_progress(progress_file):
+  if progress_file.exists():
+    with open(progress_file) as f:
+      logging.info(f'Loaded progress from {progress_file}')
+      return json.load(f)
+  return {}
+
+def save_progress(progress_file, progress):
+  with open(progress_file, 'w') as f:
+    json.dump(progress, f, indent=2)
+  logging.debug(f'Saved progress to {progress_file}')
+
+def ingest_data(data, mods_dir, progress_file):
   logging.info("Ingesting data")
+  progress = load_progress(progress_file)
+
   for item in data:
     if not item:
       continue
     filename = item['filename'].strip()
-    parent_pid = item.get('pid', None)
-
-    if parent_pid:
-      filepath = item['filepath']
-      mods = Path(mods_dir).joinpath(f'{filename}.mods.xml')
-      logging.info(f'Ingesting {filename} with existing parent {parent_pid}')
-      ingest_files(mods, filepath, stream_map, (parent_pid, 'isPartOf'))
-      continue
-
     children = item.get('children', [])
 
     # Categorize children by type
@@ -263,38 +273,55 @@ def ingest_data(data, mods_dir):
       if not match_transcript_to_video(translation['filename'], videos):
         raise ValueError(f"Could not match translation {translation['filename']} to a video")
 
-    # Create synthesized metadata-only parent using root video's MODS
-    mods = Path(mods_dir).joinpath(f'{filename}.mods.xml')
-    logging.info(f'Ingesting parent item {filename}')
-    parent_pid = ingest_files(mods, None, stream_map)
-    if not parent_pid:
-      logging.error(f"Ingest failed, no pid for parent {filename}")
-      raise RuntimeError(f"Failed to create parent item {filename}")
-    logging.info(f'Created parent {parent_pid}')
+    # Create or resume parent
+    if filename in progress:
+      parent_pid = progress[filename]['pid']
+      logging.info(f'Resuming: found existing parent {parent_pid} for {filename}')
+    else:
+      mods = Path(mods_dir).joinpath(f'{filename}.mods.xml')
+      logging.info(f'Ingesting parent item {filename}')
+      parent_pid = ingest_files(mods, None, stream_map)
+      if not parent_pid:
+        raise RuntimeError(f"Failed to create parent item {filename}")
+      progress[filename] = {'pid': parent_pid, 'children': {}}
+      save_progress(progress_file, progress)
+      logging.info(f'Created parent {parent_pid}')
 
-    video_info = {}  # filename -> {pid, page_num}
+    parent_progress = progress[filename]['children']
 
+    # Ingest videos
+    video_info = {}
     for i, video in enumerate(videos, start=1):
-      video_mods = Path(mods_dir).joinpath(f'{video["filename"]}.mods.xml')
-      logging.info(f'Ingesting video {video["filename"]} as page {i}')
-      video_pid = ingest_files(
-        video_mods,
-        video['filepath'],
-        stream_map,
-        parent_relationship=(parent_pid, 'isPartOf'),
-        page_number=i
-      )
-      if not video_pid:
-        raise RuntimeError(f"Failed to create video item {video['filename']}")
-      video_info[video['filename']] = {'pid': video_pid, 'page_num': i}
-      logging.info(f'Created video {video_pid}, queuing stream job')
-      queue_create_stream_job(video_pid)
+      if video['filename'] in parent_progress:
+        video_pid = parent_progress[video['filename']]
+        logging.info(f'Resuming: found existing video {video_pid} for {video["filename"]}')
+      else:
+        video_mods = Path(mods_dir).joinpath(f'{video["filename"]}.mods.xml')
+        logging.info(f'Ingesting video {video["filename"]} as page {i}')
+        video_pid = ingest_files(
+          video_mods,
+          video['filepath'],
+          stream_map,
+          parent_relationship=(parent_pid, 'isPartOf'),
+          page_number=i
+        )
+        if not video_pid:
+          raise RuntimeError(f"Failed to create video item {video['filename']}")
+        parent_progress[video['filename']] = video_pid
+        save_progress(progress_file, progress)
+        logging.info(f'Created video {video_pid}, queuing stream job')
+        queue_create_stream_job(video_pid)
 
+      video_info[video['filename']] = {'pid': video_pid, 'page_num': i}
+
+    # Ingest transcripts
     for transcript in transcripts:
+      if transcript['filename'] in parent_progress:
+        logging.info(f'Resuming: skipping already ingested transcript {transcript["filename"]}')
+        continue
       video = match_transcript_to_video(transcript['filename'], videos)
       v_info = video_info[video['filename']]
       page_num = f"{v_info['page_num']}a"
-
       transcript_mods = Path(mods_dir).joinpath(f'{transcript["filename"]}.mods.xml')
       logging.info(f'Ingesting transcript {transcript["filename"]} as page {page_num}')
       transcript_pid = ingest_files(
@@ -308,13 +335,18 @@ def ingest_data(data, mods_dir):
       )
       if not transcript_pid:
         raise RuntimeError(f"Failed to create transcript {transcript['filename']}")
+      parent_progress[transcript['filename']] = transcript_pid
+      save_progress(progress_file, progress)
       logging.info(f'Created transcript {transcript_pid}')
 
+    # Ingest translations
     for translation in translations:
+      if translation['filename'] in parent_progress:
+        logging.info(f'Resuming: skipping already ingested translation {translation["filename"]}')
+        continue
       video = match_transcript_to_video(translation['filename'], videos)
       v_info = video_info[video['filename']]
       page_num = f"{v_info['page_num']}b"
-
       translation_mods = Path(mods_dir).joinpath(f'{translation["filename"]}.mods.xml')
       logging.info(f'Ingesting translation {translation["filename"]} as page {page_num}')
       translation_pid = ingest_files(
@@ -327,9 +359,15 @@ def ingest_data(data, mods_dir):
       )
       if not translation_pid:
         raise RuntimeError(f"Failed to create translation {translation['filename']}")
+      parent_progress[translation['filename']] = translation_pid
+      save_progress(progress_file, progress)
       logging.info(f'Created translation {translation_pid}')
 
+    # Ingest other PDFs
     for i, pdf in enumerate(other_pdfs):
+      if pdf['filename'] in parent_progress:
+        logging.info(f'Resuming: skipping already ingested PDF {pdf["filename"]}')
+        continue
       page_num = chr(ord('a') + i)
       pdf_mods = Path(mods_dir).joinpath(f'{pdf["filename"]}.mods.xml')
       logging.info(f'Ingesting other PDF {pdf["filename"]} as page {page_num}')
@@ -342,6 +380,8 @@ def ingest_data(data, mods_dir):
       )
       if not pdf_pid:
         raise RuntimeError(f"Failed to create PDF {pdf['filename']}")
+      parent_progress[pdf['filename']] = pdf_pid
+      save_progress(progress_file, progress)
       logging.info(f'Created other PDF {pdf_pid}')
 
 def check_ingestable_for_mods(data, mods_dir):
@@ -411,7 +451,8 @@ def main(args):
     logging.debug(pformat(data,sort_dicts=False))
     logging.info("Mock run, not ingesting")
     return
-  ingest_data(data, mods_dir)
+  progress_file = get_progress_file(args.data_file, args.sheet)
+  ingest_data(data, mods_dir, progress_file)
 
 def parse_arguments():
   parser = ArgumentParser()
