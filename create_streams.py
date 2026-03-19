@@ -161,7 +161,7 @@ def update_rels_via_xml(item_api, repo_url, pid, new_triples):
             g.add(triple)
 
     xml_data = g.serialize(format='xml')
-
+    print(xml_data) # for debugging - shows the full XML being sent to the API
     params = {
         'pid': pid,
         'rels': json.dumps({'xml_data': xml_data}),
@@ -179,7 +179,7 @@ def update_item_rels(item_api, pid, rels_dict):
     simpler approach is desired in the future. It doesn't allow for
     setting multiple isTranscriptOf values, which is why the XML approach is 
     used instead.
-    
+
     Update an item's rels with the given dict.
     """
     params = {
