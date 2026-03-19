@@ -212,6 +212,30 @@ def transcript_already_linked_to_stream(item_doc, stream_pid):
         existing = [existing]
     return stream_pid in existing
 
+def build_merged_rels(existing_doc, new_rels):
+    """
+    Build a rels dict that merges new values with existing ones.
+    Without this, we would overwrite existing rels and remove any other parents.
+    existing_doc is a Solr doc dict; new_rels maps rel names to PIDs to add.
+    """
+    # Map from rels key to Solr field name
+    solr_field_map = {
+        'isPartOf': 'rel_is_part_of_ssim',
+        'isTranscriptOf': 'rel_is_transcript_of_ssim',
+    }
+    merged = {}
+    for rel_name, new_pid in new_rels.items():
+        solr_field = solr_field_map[rel_name]
+        existing = existing_doc.get(solr_field, [])
+        if isinstance(existing, str):
+            existing = [existing]
+        if new_pid not in existing:
+            all_pids = existing + [new_pid]
+        else:
+            all_pids = existing
+        merged[rel_name] = ','.join(all_pids)
+    return merged
+
 def gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=False):
     """For each video in the collection, find its stream, then point
     transcripts and translations at the stream."""
@@ -247,10 +271,11 @@ def gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=Fal
             print(f"  Transcript {t_pid} -> adding isPartOf + isTranscriptOf -> {stream_pid}")
             if not dry_run:
                 try:
-                    update_item_rels(item_api, t_pid, {
+                    rels = build_merged_rels(transcript, {
                         'isPartOf': stream_pid,
                         'isTranscriptOf': stream_pid,
                     })
+                    update_item_rels(item_api, t_pid, rels)
                     stats['transcripts_updated'] += 1
                 except Exception as e:
                     print(f"  ERROR updating {t_pid}: {e}")
@@ -270,9 +295,10 @@ def gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=Fal
             print(f"  Translation {tl_pid} -> adding isPartOf -> {stream_pid}")
             if not dry_run:
                 try:
-                    update_item_rels(item_api, tl_pid, {
+                    rels = build_merged_rels(translation, {
                         'isPartOf': stream_pid,
                     })
+                    update_item_rels(item_api, tl_pid, rels)
                     stats['translations_updated'] += 1
                 except Exception as e:
                     print(f"  ERROR updating {tl_pid}: {e}")
