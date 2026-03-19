@@ -148,9 +148,9 @@ def fetch_rels_ext(storage_url, pid):
         raise Exception(f"Failed to fetch RELS-EXT for {pid}: {resp.status_code}")
     return resp.content
 
-def update_rels_via_xml(item_api, repo_url, pid, new_triples):
+def update_rels_via_xml(item_api, storage_url, pid, new_triples):
     """Fetch current RELS-EXT, add new triples, PUT back as XML."""
-    rels_bytes = fetch_rels_ext(repo_url, pid)
+    rels_bytes = fetch_rels_ext(storage_url, pid)
     print(f"Current RELS-EXT for {pid}:")
     print(rels_bytes.decode())
     print('---')
@@ -366,7 +366,7 @@ def gcp_attach_streams_to_transcripts(api_url, collection, item_api, repo_url, d
 def main():
     load_dotenv()
     api_url = os.environ["SOLR_URL"]
-    repo_url = os.environ["REPO_URL"]
+    storage_url = os.environ["BACKEND_STORAGE_BASE_URL"]
     item_api = os.environ["API_URL"]
 
     parser = argparse.ArgumentParser(
@@ -420,7 +420,7 @@ def main():
         if args.dry_run:
             print("DRY RUN: showing what would be done")
         print("attaching streams to transcripts/translations")
-        gcp_attach_streams_to_transcripts(api_url, collection, item_api, repo_url, dry_run=args.dry_run)
+        gcp_attach_streams_to_transcripts(api_url, collection, item_api, storage_url, dry_run=args.dry_run)
         return
 
 if __name__ == "__main__":
