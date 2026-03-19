@@ -141,9 +141,9 @@ def gcp_attach_streams_to_parents(api_url,collection,item_api):
         with open("../streamIDs.csv","a") as f:
             f.write(f"{pid},{status},{panoptoId}\n")
 
-def fetch_rels_ext(repo_url, pid):
-    """Fetch current RELS-EXT XML for an item."""
-    resp = requests.get(f"{repo_url}{pid}/RELS-EXT/")
+def fetch_rels_ext(storage_url, pid):
+    """Fetch current RELS-EXT from backend storage."""
+    resp = requests.get(f"{storage_url}{pid}/RELS-EXT/")
     if not resp.ok:
         raise Exception(f"Failed to fetch RELS-EXT for {pid}: {resp.status_code}")
     return resp.content
