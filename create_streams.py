@@ -151,9 +151,6 @@ def fetch_rels_ext(storage_url, pid):
 def update_rels_via_xml(item_api, storage_url, pid, new_triples):
     """Fetch current RELS-EXT, add new triples, PUT back as XML."""
     rels_bytes = fetch_rels_ext(storage_url, pid)
-    print(f"Current RELS-EXT for {pid}:")
-    print(rels_bytes.decode())
-    print('---')
     g = Graph()
     g.parse(BytesIO(rels_bytes), format='application/rdf+xml')
 
@@ -164,9 +161,6 @@ def update_rels_via_xml(item_api, storage_url, pid, new_triples):
             g.add(triple)
 
     xml_data = g.serialize(format='xml')
-    print(f"Updated RELS-EXT for {pid}:")
-    print(xml_data) # for debugging - shows the full XML being sent to the API
-    print('---=')
     params = {
         'pid': pid,
         'rels': json.dumps({'xml_data': xml_data}),
