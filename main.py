@@ -8,6 +8,7 @@ from create_streams import queue_create_stream_job
 import logging
 import pandas as pd
 import json
+import unicodedata
 
 stream_map = {
   ".mov": "VIDEO-MASTER",
@@ -85,8 +86,15 @@ def dict_from_row(row, pid=None):
   filename = str(row['identifierFileName']).strip()
 
   if not filepath.exists():
-    logging.warning(f"File {filepath} does not exist")
-    return {}
+    # Try alternate Unicode normalization
+    alt_form = 'NFD' if unicodedata.is_normalized('NFC', str(filepath)) else 'NFC'
+    alt_filepath = Path(unicodedata.normalize(alt_form, str(filepath)))
+    if alt_filepath.exists():
+      logging.debug(f"Resolved filepath {filepath} using alternate Unicode normalization form {alt_form}")
+      filepath = alt_filepath
+    else:
+      logging.warning(f"File {filepath} does not exist")
+      return {}
 
   if filepath.is_dir():
     # Old format: filepath is a directory, glob for filename
