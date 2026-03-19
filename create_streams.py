@@ -143,7 +143,7 @@ def gcp_attach_streams_to_parents(api_url,collection,item_api):
 
 def fetch_rels_ext(storage_url, pid):
     """Fetch current RELS-EXT from backend storage."""
-    resp = requests.get(f"{storage_url}{pid}/RELS-EXT/")
+    resp = requests.get(f"{storage_url}{pid}/files/RELS-EXT/content?checkaccess=no")
     if not resp.ok:
         raise Exception(f"Failed to fetch RELS-EXT for {pid}: {resp.status_code}")
     return resp.content
