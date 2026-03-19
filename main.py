@@ -247,7 +247,7 @@ def save_progress(progress_file, progress):
     json.dump(progress, f, indent=2)
   logging.debug(f'Saved progress to {progress_file}')
 
-def ingest_data(data, mods_dir, progress_file):
+def ingest_data(data, mods_dir, collection_pid, progress_file):
   logging.info("Ingesting data")
   progress = load_progress(progress_file)
 
@@ -280,7 +280,7 @@ def ingest_data(data, mods_dir, progress_file):
     else:
       mods = Path(mods_dir).joinpath(f'{filename}.mods.xml')
       logging.info(f'Ingesting parent item {filename}')
-      parent_pid = ingest_files(mods, None, stream_map)
+      parent_pid = ingest_files(mods, None, stream_map, collection_pid)
       if not parent_pid:
         raise RuntimeError(f"Failed to create parent item {filename}")
       progress[filename] = {'pid': parent_pid, 'children': {}}
@@ -302,6 +302,7 @@ def ingest_data(data, mods_dir, progress_file):
           video_mods,
           video['filepath'],
           stream_map,
+          collection_pid,
           parent_relationship=(parent_pid, 'isPartOf'),
           page_number=i
         )
@@ -328,6 +329,7 @@ def ingest_data(data, mods_dir, progress_file):
         transcript_mods,
         transcript['filepath'],
         stream_map,
+        collection_pid,
         parent_relationship=(parent_pid, 'isPartOf'),
         page_number=page_num,
         additional_parents=[v_info['pid']],
@@ -353,6 +355,7 @@ def ingest_data(data, mods_dir, progress_file):
         translation_mods,
         translation['filepath'],
         stream_map,
+        collection_pid,
         parent_relationship=(parent_pid, 'isPartOf'),
         page_number=page_num,
         additional_parents=[v_info['pid']]
@@ -375,6 +378,7 @@ def ingest_data(data, mods_dir, progress_file):
         pdf_mods,
         pdf['filepath'],
         stream_map,
+        collection_pid,
         parent_relationship=(parent_pid, 'isPartOf'),
         page_number=page_num
       )
@@ -452,10 +456,14 @@ def main(args):
     logging.info("Mock run, not ingesting")
     return
   progress_file = get_progress_file(args.data_file, args.sheet)
-  ingest_data(data, mods_dir, progress_file)
+  ingest_data(data, mods_dir, args.collection, progress_file)
 
 def parse_arguments():
   parser = ArgumentParser()
+  parser.add_argument('collection',
+    type=str,
+    help='PID of the collection to ingest into (e.g. bdr:12345)'
+  )
   parser.add_argument('data_file',
     type=Path,
     help='Path to the data file'

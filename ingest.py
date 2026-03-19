@@ -12,9 +12,6 @@ def setup_environment():
   logging.info("setting up environment")
   ## allows bdr_tools to be imported ------------------------------
   load_dotenv(find_dotenv())
-  # Get the COLLECTION_PID from the .env file
-  COLLECTION_PID = os.environ["COLLECTION_PID"]
-  logging.debug(f"COLLECTION_PID, ``{COLLECTION_PID}``")
   API_IDENTITY = os.environ["API_IDENTITY"]
   logging.debug(f"API_IDENTITY, ``{API_IDENTITY}``")
   API_URL = os.environ["API_URL"]
@@ -25,7 +22,6 @@ def setup_environment():
   logging.debug(f"API_KEY, ``{API_KEY}``")
 
   env_vars = {}
-  env_vars["collection_pid"] = COLLECTION_PID
   env_vars["api_identity"] = API_IDENTITY
   env_vars["api_url"] = API_URL
   env_vars["owner_id"] = OWNER_ID
@@ -33,7 +29,7 @@ def setup_environment():
 
   return env_vars
 
-def set_basic_params(env_vars, additional_rights='BDR_PUBLIC#discover,display'):
+def set_basic_params(env_vars, collection_pid, additional_rights='BDR_PUBLIC#discover,display'):
   params = {
     "identity": env_vars["api_identity"],
     "authorization_code": env_vars["api_key"],
@@ -45,7 +41,7 @@ def set_basic_params(env_vars, additional_rights='BDR_PUBLIC#discover,display'):
         }
       }
     ),
-    "rels": json.dumps({"isMemberOfCollection": env_vars["collection_pid"]}),
+    "rels": json.dumps({"isMemberOfCollection": collection_pid}),
   }
   return params
 
@@ -97,23 +93,25 @@ def ingest_files(
     mods_path,
     file_path,
     allowed_streams:dict,
+    collection_pid:str,
     parent_relationship=None,
     page_number=None,
     additional_parents=None,
     transcript_of=None
-  ) -> str:
+  ) -> str|None:
   """
   Ingests files into a system.
   Args:
     mods_path (str): The path to the MODS file.
     file_path (str): The path to the file to ingest.
     allowed_streams (dict): A dictionary mapping file extensions to content streams.
+    collection_pid (str): The PID of the collection to ingest into.
     parent_relationship (tuple): The pid and relationship to parent. Defaults to None.
     page_number (str|int): Page number/order for the item. Defaults to None.
     additional_parents (list): Additional parent PIDs for dual parentage. Defaults to None.
     transcript_of (str): PID this item is a transcript of (sets isTranscriptOf). Defaults to None.
   Returns:
-    (str): The PID of the ingested files.
+    (str|None): The PID of the ingested files, or None if ingestion was skipped.
   """
 
   env_vars = setup_environment()
@@ -125,7 +123,7 @@ def ingest_files(
   else:
     additional_rights = 'BDR_PUBLIC#display'
 
-  params = set_basic_params(env_vars, additional_rights=additional_rights)
+  params = set_basic_params(env_vars, collection_pid, additional_rights=additional_rights)
 
   mods_path = Path(mods_path)
   if not mods_path.exists():

@@ -118,6 +118,8 @@ def gcp_attach_streams_to_parents(api_url,collection,item_api):
     with open("../streamIDs.csv","w") as f:
             f.write("pid,status,panoptoId\n")
     parents = get_top_level_items(api_url,collection)
+    if not parents:
+        raise Exception("no parent items found")
     for parent in parents:
         pid = parent['pid']
         filename = parent['mods_id_filename_ssim'][0]
@@ -134,14 +136,172 @@ def gcp_attach_streams_to_parents(api_url,collection,item_api):
         with open("../streamIDs.csv","a") as f:
             f.write(f"{pid},{status},{panoptoId}\n")
 
+def update_item_rels(item_api, pid, rels_dict):
+    """Update an item's rels with the given dict."""
+    params = {
+        'pid': pid,
+        'rels': json.dumps(rels_dict),
+        'permission_ids': json.dumps([os.environ['API_IDENTITY']]),
+        'message': "gcp: attach stream to transcript/translation",
+        'agent_name': "gcp ingest"
+    }
+    r = requests.put(item_api, data=params)
+    if not r.ok:
+        raise Exception(f'Failed to update rels for {pid}: {r.status_code} - {r.text}')
+
+def get_videos_in_collection(api_url, collection):
+    """Get all video objects in the collection."""
+    resp = requests.get(api_url, params={
+        "q": f"rel_is_member_of_collection_ssim:{collection} object_type:video",
+        "rows": 9999
+    })
+    response = check_response(resp, "videos in collection")
+    print(f"found {response['numFound']} videos")
+    return response['docs']
+
+def get_stream_for_video(api_url, video_pid):
+    """Get the stream derived from a video. Returns the stream doc or None."""
+    resp = requests.get(api_url, params={
+        "q": f"rel_is_derivation_of_ssim:{video_pid} object_type:stream"
+    })
+    try:
+        response = check_response(resp, f"stream for {video_pid}")
+    except ResponseError:
+        return None
+    if response['numFound'] == 0:
+        return None
+    if response['numFound'] > 1:
+        print(f"WARNING: multiple streams for {video_pid}, using first")
+    return response['docs'][0]
+
+def get_transcripts_of_video(api_url, video_pid):
+    """Get items that are transcripts of this video (have isTranscriptOf pointing to it)."""
+    resp = requests.get(api_url, params={
+        "q": f"rel_is_transcript_of_ssim:{video_pid}",
+        "rows": 9999
+    })
+    try:
+        response = check_response(resp, f"transcripts of {video_pid}")
+    except ResponseError:
+        return []
+    return response['docs']
+
+def get_translations_of_video(api_url, video_pid):
+    """Get items that are parented to this video but are NOT transcripts of it.
+    Filters to PDFs only to avoid picking up streams or other children."""
+    resp = requests.get(api_url, params={
+        "q": f"rel_is_part_of_ssim:{video_pid} object_type:pdf \
+            !rel_is_transcript_of_ssim:{video_pid}",
+        "rows": 9999
+    })
+    try:
+        response = check_response(resp, f"translations of {video_pid}")
+    except ResponseError:
+        return []
+    return response['docs']
+
+def item_already_linked_to_stream(item_doc, stream_pid):
+    """Check if an item already has isPartOf pointing to the stream."""
+    existing_parents = item_doc.get('rel_is_part_of_ssim', [])
+    return stream_pid in existing_parents
+
+def transcript_already_linked_to_stream(item_doc, stream_pid):
+    """Check if a transcript already has isTranscriptOf pointing to the stream."""
+    existing = item_doc.get('rel_is_transcript_of_ssim', [])
+    if isinstance(existing, str):
+        existing = [existing]
+    return stream_pid in existing
+
+def gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=False):
+    """For each video in the collection, find its stream, then point
+    transcripts and translations at the stream."""
+    videos = get_videos_in_collection(api_url, collection)
+    
+    stats = {'videos': 0, 'no_stream': 0, 'transcripts_updated': 0,
+             'translations_updated': 0, 'already_done': 0, 'errors': 0}
+
+    for video_doc in videos:
+        video_pid = video_doc['pid']
+        stats['videos'] += 1
+        print(f"\n--- Video: {video_pid} ---")
+
+        # Find the stream for this video
+        stream_doc = get_stream_for_video(api_url, video_pid)
+        if not stream_doc:
+            print(f"  No stream found for {video_pid}, skipping")
+            stats['no_stream'] += 1
+            continue
+        stream_pid = stream_doc['pid']
+        print(f"  Stream: {stream_pid}")
+
+        # Process transcripts
+        transcripts = get_transcripts_of_video(api_url, video_pid)
+        for transcript in transcripts:
+            t_pid = transcript['pid']
+            if item_already_linked_to_stream(transcript, stream_pid) \
+                    and transcript_already_linked_to_stream(transcript, stream_pid):
+                print(f"  Transcript {t_pid} already linked to stream, skipping")
+                stats['already_done'] += 1
+                continue
+
+            print(f"  Transcript {t_pid} -> adding isPartOf + isTranscriptOf -> {stream_pid}")
+            if not dry_run:
+                try:
+                    update_item_rels(item_api, t_pid, {
+                        'isPartOf': stream_pid,
+                        'isTranscriptOf': stream_pid,
+                    })
+                    stats['transcripts_updated'] += 1
+                except Exception as e:
+                    print(f"  ERROR updating {t_pid}: {e}")
+                    stats['errors'] += 1
+            else:
+                stats['transcripts_updated'] += 1
+
+        # Process translations
+        translations = get_translations_of_video(api_url, video_pid)
+        for translation in translations:
+            tl_pid = translation['pid']
+            if item_already_linked_to_stream(translation, stream_pid):
+                print(f"  Translation {tl_pid} already linked to stream, skipping")
+                stats['already_done'] += 1
+                continue
+
+            print(f"  Translation {tl_pid} -> adding isPartOf -> {stream_pid}")
+            if not dry_run:
+                try:
+                    update_item_rels(item_api, tl_pid, {
+                        'isPartOf': stream_pid,
+                    })
+                    stats['translations_updated'] += 1
+                except Exception as e:
+                    print(f"  ERROR updating {tl_pid}: {e}")
+                    stats['errors'] += 1
+            else:
+                stats['translations_updated'] += 1
+
+    # Summary
+    print(f"\n{'=== DRY RUN SUMMARY ===' if dry_run else '=== SUMMARY ==='}")
+    print(f"Videos processed: {stats['videos']}")
+    print(f"Videos without streams: {stats['no_stream']}")
+    print(f"Transcripts {'would be ' if dry_run else ''}updated: {stats['transcripts_updated']}")
+    print(f"Translations {'would be ' if dry_run else ''}updated: {stats['translations_updated']}")
+    print(f"Already done (skipped): {stats['already_done']}")
+    if stats['errors']:
+        print(f"Errors: {stats['errors']}")
+
 def main():
     load_dotenv()
     api_url = os.environ["SOLR_URL"]
     item_api = os.environ["API_URL"]
-    collection = os.environ["COLLECTION_PID"]
 
     parser = argparse.ArgumentParser(
         description="makes streams and adds stream to parent for GCP"
+    )
+
+    parser.add_argument('collection',
+        type=str,
+        help='PID of the collection to operate on (e.g. bdr:12345)'
     )
 
     parser.add_argument("-q","--queue-stream-jobs",
@@ -154,22 +314,40 @@ def main():
         help="add stream IDs to parents in GCP collection",
         dest='add'
     )
+    parser.add_argument("-t","--attach-streams-to-transcripts",
+        action="store_true",
+        help="attach stream PIDs to transcripts/translations as parents",
+        dest='attach_transcripts'
+    )
+    parser.add_argument("--dry-run",
+        action="store_true",
+        help="show what would be done without making changes",
+        dest='dry_run'
+    )
 
     args = parser.parse_args()
+    collection = args.collection
 
-    if args.queue and args.add:
-        print("can't make streams and add to parent at once, please allow time for stream generation")
+    selected = sum([args.queue, args.add, args.attach_transcripts])
+    if selected != 1:
+        print("please select exactly one operation (-q, -a, or -t)")
         parser.print_help()
         return
+
     if args.queue:
         print("queueing jobs for full gcp collection")
-        gcp_make_streams(api_url,collection)
+        gcp_make_streams(api_url, collection)
         return
     if args.add:
         print("attaching streams to parents for full gcp collection")
-        gcp_attach_streams_to_parents(api_url,collection,item_api)
+        gcp_attach_streams_to_parents(api_url, collection, item_api)
         return
-    parser.print_help()
+    if args.attach_transcripts:
+        if args.dry_run:
+            print("DRY RUN: showing what would be done")
+        print("attaching streams to transcripts/translations")
+        gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=args.dry_run)
+        return
 
 if __name__ == "__main__":
     main()
