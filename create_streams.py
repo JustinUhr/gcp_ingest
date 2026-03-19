@@ -6,6 +6,11 @@ from redis import Redis
 import requests
 from dotenv import load_dotenv
 import urllib.parse
+from io import BytesIO
+from rdflib import Graph, URIRef, Namespace
+
+RELSEXT_NS = Namespace('info:fedora/fedora-system:def/relations-external#')
+BUL_NS = Namespace('http://library.brown.edu/#')
 
 class ResponseError(RuntimeError):
     pass
@@ -136,8 +141,47 @@ def gcp_attach_streams_to_parents(api_url,collection,item_api):
         with open("../streamIDs.csv","a") as f:
             f.write(f"{pid},{status},{panoptoId}\n")
 
+def fetch_rels_ext(repo_url, pid):
+    """Fetch current RELS-EXT XML for an item."""
+    resp = requests.get(f"{repo_url}{pid}/RELS-EXT/")
+    if not resp.ok:
+        raise Exception(f"Failed to fetch RELS-EXT for {pid}: {resp.status_code}")
+    return resp.content
+
+def update_rels_via_xml(item_api, repo_url, pid, new_triples):
+    """Fetch current RELS-EXT, add new triples, PUT back as XML."""
+    rels_bytes = fetch_rels_ext(repo_url, pid)
+    g = Graph()
+    g.parse(BytesIO(rels_bytes), format='application/rdf+xml')
+
+    obj_uri = URIRef(f'info:fedora/{pid}')
+    for predicate, object_pid in new_triples:
+        triple = (obj_uri, predicate, URIRef(f'info:fedora/{object_pid}'))
+        if triple not in g:
+            g.add(triple)
+
+    xml_data = g.serialize(format='xml')
+
+    params = {
+        'pid': pid,
+        'rels': json.dumps({'xml_data': xml_data}),
+        'permission_ids': json.dumps([os.environ['API_IDENTITY']]),
+        'message': "gcp: attach stream to transcript/translation",
+        'agent_name': "gcp ingest"
+    }
+    r = requests.put(item_api, data=params)
+    if not r.ok:
+        raise Exception(f'Failed to update rels for {pid}: {r.status_code} - {r.text}')
+
 def update_item_rels(item_api, pid, rels_dict):
-    """Update an item's rels with the given dict."""
+    """
+    NOTE: This function is not currently used, but is left in case a 
+    simpler approach is desired in the future. It doesn't allow for
+    setting multiple isTranscriptOf values, which is why the XML approach is 
+    used instead.
+    
+    Update an item's rels with the given dict.
+    """
     params = {
         'pid': pid,
         'rels': json.dumps(rels_dict),
@@ -236,7 +280,7 @@ def build_merged_rels(existing_doc, new_rels):
         merged[rel_name] = ','.join(all_pids)
     return merged
 
-def gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=False):
+def gcp_attach_streams_to_transcripts(api_url, collection, item_api, repo_url, dry_run=False):
     """For each video in the collection, find its stream, then point
     transcripts and translations at the stream."""
     videos = get_videos_in_collection(api_url, collection)
@@ -271,11 +315,10 @@ def gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=Fal
             print(f"  Transcript {t_pid} -> adding isPartOf + isTranscriptOf -> {stream_pid}")
             if not dry_run:
                 try:
-                    rels = build_merged_rels(transcript, {
-                        'isPartOf': stream_pid,
-                        'isTranscriptOf': stream_pid,
-                    })
-                    update_item_rels(item_api, t_pid, rels)
+                    update_rels_via_xml(item_api, repo_url, t_pid, [
+                        (RELSEXT_NS.isPartOf, stream_pid),
+                        (BUL_NS.isTranscriptOf, stream_pid),
+                    ])
                     stats['transcripts_updated'] += 1
                 except Exception as e:
                     print(f"  ERROR updating {t_pid}: {e}")
@@ -295,10 +338,9 @@ def gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=Fal
             print(f"  Translation {tl_pid} -> adding isPartOf -> {stream_pid}")
             if not dry_run:
                 try:
-                    rels = build_merged_rels(translation, {
-                        'isPartOf': stream_pid,
-                    })
-                    update_item_rels(item_api, tl_pid, rels)
+                    update_rels_via_xml(item_api, repo_url, tl_pid, [
+                        (RELSEXT_NS.isPartOf, stream_pid),
+                    ])
                     stats['translations_updated'] += 1
                 except Exception as e:
                     print(f"  ERROR updating {tl_pid}: {e}")
@@ -319,6 +361,7 @@ def gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=Fal
 def main():
     load_dotenv()
     api_url = os.environ["SOLR_URL"]
+    repo_url = os.environ["REPO_URL"]
     item_api = os.environ["API_URL"]
 
     parser = argparse.ArgumentParser(
@@ -372,7 +415,7 @@ def main():
         if args.dry_run:
             print("DRY RUN: showing what would be done")
         print("attaching streams to transcripts/translations")
-        gcp_attach_streams_to_transcripts(api_url, collection, item_api, dry_run=args.dry_run)
+        gcp_attach_streams_to_transcripts(api_url, collection, item_api, repo_url, dry_run=args.dry_run)
         return
 
 if __name__ == "__main__":
